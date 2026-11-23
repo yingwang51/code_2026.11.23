@@ -265,7 +265,7 @@ plots_china <- create_linear_predictor_plots(
 # Rationale: 6-panel layout (3 predictors × 2 components) with shared legend
 #            facilitates comparison of effect patterns across variables
 
-figure_s3 <- (
+figure_s2 <- (
   plots_native$zero + plots_native$count +
     plots_china$zero + plots_china$count +
     plots_worldcup$zero + plots_worldcup$count +
@@ -292,8 +292,8 @@ figure_s3 <- (
 # 9. Export --------------------------------------------------------------------
 # Rationale: High-resolution PNG for supplementary materials
 ggexport(
-  figure_s3,
-  filename  = here("results", "Figure_S3.png"),
+  figure_s2,
+  filename  = here("results", "Figure_S2.png"),
   width     = 4200,
   height    = 6000,
   pointsize = 12,
