@@ -23,11 +23,11 @@ cat("\014")
 
 # --- 1.1 Paths and Analysis Settings ---
 # Change project_dir if the data and results are stored elsewhere.
-project_dir <- "E:/中国本地植物归化/sem分析"
+project_dir <- "your_work_path"
 data_file <- file.path(
   project_dir, "20250530.native_plant.matched.cultivated_plant_DO11.csv"
 )
-result_dir <- file.path(project_dir, "2026.1104.results")
+result_dir <- file.path(project_dir, "results")
 figure_dir <- file.path(result_dir, "figures")
 model_file <- file.path(result_dir, "models_naturalization_success.RData")
 dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
