@@ -807,6 +807,261 @@ ggexport(
   res       = 300
 )
 
+# 8. Life-Form Effect Predictions ----------------------------------------------
+life_levels <- levels(native.flora02$life.form.integrated)
+
+# --- Function: Predict at Mean Continuous Predictors ---
+# Rationale: Compare life forms while holding all continuous predictors at
+#            their means in the supplied data. Outputs are point predictions.
+predict_lifeform_effect <- function(
+    model, data, life_levels, response_name = "response") {
+  pred_data <- data.frame(
+    life.form.integrated = factor(
+      life_levels,
+      levels = c("annual herb", "perennial herb", "woody")
+    )
+  )
+
+  pred_data$scale.native.global.tdwg3 <-
+    mean(data$scale.native.global.tdwg3, na.rm = TRUE)
+  pred_data$scale.WorldCuP.n.tdwg3 <-
+    mean(data$scale.WorldCuP.n.tdwg3, na.rm = TRUE)
+  pred_data$scale.planting.China.tdwg3 <-
+    mean(data$scale.planting.China.tdwg3, na.rm = TRUE)
+
+  pred_data[[response_name]] <- predict(
+    model, newdata = pred_data, type = "response"
+  )
+
+  return(pred_data)
+}
+
+# --- Generate Predictions for Each Model ---
+pred_lifeform <- predict_lifeform_effect(
+  model, native.flora02, life_levels
+)
+
+pred_lifeform_binom <- predict_lifeform_effect(
+  zero_glm, native.flora02, life_levels,
+  response_name = "prob_naturalized"
+)
+
+# Use positive-count data to obtain the count model's reference predictor means.
+pred_lifeform_trunc <- predict_lifeform_effect(
+  count_vglm, data_nonzero, life_levels,
+  response_name = "expected_count"
+)
+
+print(pred_lifeform)
+
+# 9. Visualization Setup -------------------------------------------------------
+
+# --- Life-Form Colors and Labels ---
+color_palette <- c(
+  "annual herb" = "#E31A1C",
+  "perennial herb" = "#1F78B4",
+  "woody" = "#F8AF66"
+)
+
+life_labels <- c(
+  "annual herb" = "Annual herbs",
+  "perennial herb" = "Perennial herbs",
+  "woody" = "Woody plants"
+)
+
+# --- Publication Theme ---
+theme_standard <- theme_classic(base_size = 20, base_family = "serif") +
+  theme(
+    panel.background = element_rect(fill = "white", colour = NA),
+    plot.background = element_rect(fill = "white", colour = NA),
+    panel.grid = element_blank(),
+    axis.line = element_line(colour = "black", linewidth = 1.5),
+    axis.ticks = element_line(colour = "black", linewidth = 1.5),
+    axis.text = element_text(colour = "black", size = 20),
+    axis.title = element_text(colour = "black", size = 20),
+    legend.title = element_text(size = 20),
+    legend.text = element_text(size = 20),
+    legend.position = "top"
+  )
+
+# --- Function: Plot a Life-Form Effect ---
+plot_lifeform_effect <- function(
+    pred_data, response_var, y_label, y_limits, y_breaks) {
+  ggplot(
+    pred_data,
+    aes(
+      x = life.form.integrated,
+      y = .data[[response_var]],
+      fill = life.form.integrated
+    )
+  ) +
+    geom_col(width = 0.6) +
+    scale_fill_manual(values = color_palette, name = "Life forms:") +
+    labs(x = "Growth habit", y = y_label) +
+    scale_x_discrete(labels = life_labels) +
+    scale_y_continuous(limits = y_limits, breaks = y_breaks) +
+    theme_standard +
+    theme(
+      axis.title.x = element_text(size = 22),
+      axis.title.y = element_text(size = 22),
+      axis.text.x = element_text(size = 20, angle = 0, hjust = 0.5),
+      axis.text.y = element_text(size = 20),
+      legend.position = "none"
+    )
+}
+
+# 10. Generate and Export Figures ----------------------------------------------
+
+# --- Individual Panels ---
+plot_lifeform_hurdle <- plot_lifeform_effect(
+  pred_lifeform,
+  response_var = "response",
+  y_label = "Naturalization success\n(no. of regions)",
+  y_limits = c(0, 0.12),
+  y_breaks = seq(0, 0.12, by = 0.03)
+)
+
+plot_lifeform_binom <- plot_lifeform_effect(
+  pred_lifeform_binom,
+  response_var = "prob_naturalized",
+  y_label = "Naturalization incidence\n(no, yes)",
+  y_limits = c(0, 0.04),
+  y_breaks = seq(0, 0.04, by = 0.01)
+)
+
+plot_lifeform_trunc <- plot_lifeform_effect(
+  pred_lifeform_trunc,
+  response_var = "expected_count",
+  y_label = "Naturalization extent\n(no. of regions)",
+  y_limits = c(0, 20),
+  y_breaks = seq(0, 20, by = 5)
+)
+
+print(plot_lifeform_hurdle)
+
+# --- Combine Component Models: Two Columns ---
+plots_lifeform_combined <- (
+  plot_lifeform_binom + plot_lifeform_trunc
+) +
+  plot_layout(ncol = 2) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 20, face = "bold"))
+
+print(plots_lifeform_combined)
+
+# --- Combine All Models: Three Rows ---
+plots_lifeform_combined02 <- (
+  plot_lifeform_hurdle + plot_lifeform_binom + plot_lifeform_trunc
+) +
+  plot_layout(ncol = 1) +
+  plot_annotation(tag_levels = "A") &
+  theme(plot.tag = element_text(size = 20, face = "bold"))
+
+print(plots_lifeform_combined02)
+
+ggexport(
+  plots_lifeform_combined02,
+  filename = file.path(result_dir, "Figure_S1.png"),
+  width = 2500, height = 5500, pointsize = 12, res = 300
+)
+
+# 11. Hurdle Models for Likelihood Ratio Tests ----------------------------------
+
+# --- Define Main Effects and Interactions ---
+predictor_terms <- c(
+  "scale.native.global.tdwg3",
+  "scale.WorldCuP.n.tdwg3",
+  "scale.planting.China.tdwg3"
+)
+main_terms <- c(predictor_terms, "life.form.integrated")
+interaction_terms <- paste0(predictor_terms, ":life.form.integrated")
+full_terms <- c(main_terms, interaction_terms)
+
+# --- Function: Build a Two-Part Formula ---
+make_hurdle_formula <- function(count_terms, zero_terms) {
+  as.formula(paste(
+    "nat.extent ~", paste(count_terms, collapse = " + "),
+    "|", paste(zero_terms, collapse = " + ")
+  ))
+}
+
+# --- Reduced Terms for the Component Being Tested ---
+# Main effects are tested after removing all interactions from that component.
+# Each interaction is tested by dropping it from the full component formula.
+# The other component retains all main effects and interactions in every model.
+reduced_terms <- list(
+  no_interaction = main_terms,
+  no_nat = setdiff(main_terms, predictor_terms[1]),
+  no_worldcup = setdiff(main_terms, predictor_terms[2]),
+  no_china = setdiff(main_terms, predictor_terms[3]),
+  no_int1 = setdiff(full_terms, interaction_terms[1]),
+  no_int2 = setdiff(full_terms, interaction_terms[2]),
+  no_int3 = setdiff(full_terms, interaction_terms[3]),
+  no_life = predictor_terms
+)
+
+formula_full <- make_hurdle_formula(full_terms, full_terms)
+
+formulas_zero <- lapply(reduced_terms, function(terms) {
+  make_hurdle_formula(full_terms, terms)
+})
+
+formulas_count <- lapply(reduced_terms, function(terms) {
+  make_hurdle_formula(terms, full_terms)
+})
+
+# --- Fit the Full Model and Both Sets of Reduced Models ---
+fit_hurdle_model <- function(model_formula) {
+  pscl::hurdle(model_formula, dist = "negbin", data = native.flora02)
+}
+
+model_full <- fit_hurdle_model(formula_full)
+models_zero <- lapply(formulas_zero, fit_hurdle_model)
+models_count <- lapply(formulas_count, fit_hurdle_model)
+
+# 12. Compile and Export Likelihood Ratio Tests ---------------------------------
+
+# --- Function: Test Main Effects and Interactions in One Component ---
+test_component <- function(reduced_models, full_model, part_name) {
+  results_list <- list(
+    "NatRange" = tidy(lmtest::lrtest(
+      reduced_models$no_interaction, reduced_models$no_nat
+    )),
+    "WorldCuP" = tidy(lmtest::lrtest(
+      reduced_models$no_interaction, reduced_models$no_worldcup
+    )),
+    "ChinaPlant" = tidy(lmtest::lrtest(
+      reduced_models$no_interaction, reduced_models$no_china
+    )),
+    "NatRange × Life" = tidy(lmtest::lrtest(
+      full_model, reduced_models$no_int1
+    )),
+    "WorldCuP × Life" = tidy(lmtest::lrtest(
+      full_model, reduced_models$no_int2
+    )),
+    "ChinaPlant × Life" = tidy(lmtest::lrtest(
+      full_model, reduced_models$no_int3
+    )),
+    "Life Form" = tidy(lmtest::lrtest(
+      reduced_models$no_interaction, reduced_models$no_life
+    ))
+  )
+
+  bind_rows(results_list, .id = "Test") %>%
+    mutate(Test = paste0(part_name, ": ", Test))
+}
+
+# --- Combine Zero and Count Component Tests ---
+native_hurdle_LRT <- bind_rows(
+  test_component(models_zero, model_full, "Zero"),
+  test_component(models_count, model_full, "Count")
+)
+print(native_hurdle_LRT)
+
+write_csv(native_hurdle_LRT, "Table_1.csv")
+
+
 # ==============================================================================
 # END OF SCRIPT
 # ==============================================================================
+
