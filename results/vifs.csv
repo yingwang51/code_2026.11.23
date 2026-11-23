@@ -1,0 +1,21 @@
+Term,GVIF,Df,GVIF_adj,Part
+(Intercept):1,Inf,1,Inf,Count
+(Intercept):2,Inf,1,Inf,Count
+scale.native.global.tdwg3,9.059236275674875,1,3.0098565207788353,Count
+scale.WorldCuP.n.tdwg3,12.959382922586205,1,3.5999142937834234,Count
+scale.planting.China.tdwg3,11.598256771512085,1,3.405621348816114,Count
+life.form.integratedannual herb,13.502979996493046,1,3.674640117956185,Count
+life.form.integratedperennial herb,13.861105827057065,1,3.7230506076411403,Count
+scale.native.global.tdwg3:life.form.integratedannual herb,12.219320581521655,1,3.4956144783888363,Count
+scale.native.global.tdwg3:life.form.integratedperennial herb,9.367950786911122,1,3.0607108303319217,Count
+scale.WorldCuP.n.tdwg3:life.form.integratedannual herb,3.355454822342563,1,1.8317900595708458,Count
+scale.WorldCuP.n.tdwg3:life.form.integratedperennial herb,8.168086850527716,1,2.857986502859612,Count
+scale.planting.China.tdwg3:life.form.integratedannual herb,3.4809228246320707,1,1.8657231371862415,Count
+scale.planting.China.tdwg3:life.form.integratedperennial herb,6.932270698056098,1,2.632920564327017,Count
+scale.native.global.tdwg3,4.042582070672353,1,2.010617335713674,Zero
+scale.WorldCuP.n.tdwg3,6.323327091584238,1,2.514622653915342,Zero
+scale.planting.China.tdwg3,6.654119544190468,1,2.5795580133407485,Zero
+life.form.integrated,27.74856056293303,2,2.2951449299193354,Zero
+scale.native.global.tdwg3:life.form.integrated,27.147726161291846,2,2.282618669095318,Zero
+scale.WorldCuP.n.tdwg3:life.form.integrated,6.384339188157971,2,1.5895675489219863,Zero
+scale.planting.China.tdwg3:life.form.integrated,6.8674113628482365,2,1.6188188980094265,Zero
