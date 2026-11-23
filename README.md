@@ -56,7 +56,7 @@
 - Calculate generalized variance inflation factors (GVIFs) for the binomial model using `car::vif()` and column-wise VIFs for the count model using auxiliary regressions on its design matrix
 - Combine the diagnostics, degrees of freedom, and adjusted values in a single table, identifying the model component for each entry
 
-**Output**: Table S3 (collinearity diagnostics for both model components; `Table_S3.csv`)
+**Output**: Table S3 (collinearity diagnostics for both model components)
 
 ---
 
@@ -75,7 +75,7 @@
 
 - Figures 3 and S3: BSEM path diagrams for naturalization incidence, extent, and overall success, each covering all species and the three growth habit groups
   
-- Table S2: Posterior summaries for 72 plotted paths (3 outcomes × 4 groups × 6 paths), including effect estimates, 95% credible intervals, directional probabilities, and effect scales
+- Table S2: Posterior path coefficients from Bayesian structural equation models (BSEMs) incorporating hurdle equations, separately for each growth habit and for each response: cultivation within China, cultivation outside China, naturalization incidence, naturalization extent, and overall naturalization success
   
 
 ---
