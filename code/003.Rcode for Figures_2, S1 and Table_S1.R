@@ -24,6 +24,10 @@ pacman::p_load(
 rm(list = ls())
 cat("\014")
 
+# Rationale: Set project root for all relative paths
+setwd(here())
+getwd()
+
 # 2. Data Loading & Preprocessing ----------------------------------------------
 # Rationale: Load matched native-cultivated plant dataset with standardized
 #            TDWG Level 3 geographic units and trait data
