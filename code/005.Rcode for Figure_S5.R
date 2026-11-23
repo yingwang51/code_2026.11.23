@@ -135,7 +135,7 @@ correlation_plot_final
 if (!dir.exists(here("results"))) dir.create(here("results"))
 ggexport(
   correlation_plot_final, 
-  filename  = here("results", "Figure_S6.png"),
+  filename  = here("results", "Figure_S5.png"),
   width     = 2000,
   height    = 2000,
   pointsize = 12,
