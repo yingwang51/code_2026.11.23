@@ -3,7 +3,7 @@
 # Description:  Bayesian SEM linking native range size, cultivation extent, and
 #               naturalization. One hurdle model per group provides three views:
 #               incidence, extent, and overall naturalization success.
-# Outputs:      Four fitted models, three 2 x 2 figures, and Table S2.
+# Outputs:      Figure 3 and S3, Table S2.
 # ==============================================================================
 
 # 1. Environment Setup ---------------------------------------------------------
