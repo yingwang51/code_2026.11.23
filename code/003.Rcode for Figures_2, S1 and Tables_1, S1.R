@@ -961,7 +961,7 @@ print(plots_lifeform_combined02)
 
 ggexport(
   plots_lifeform_combined02,
-  filename = file.path(result_dir, "Figure_S1.png"),
+  filename  = here("results", "Figure_S1.png"),
   width = 2500, height = 5500, pointsize = 12, res = 300
 )
 
@@ -1058,10 +1058,12 @@ native_hurdle_LRT <- bind_rows(
 )
 print(native_hurdle_LRT)
 
-write_csv(native_hurdle_LRT, "Table_1.csv")
+write_csv(native_hurdle_LRT, here("results", "Table_1.csv.csv"))
+
 
 
 # ==============================================================================
 # END OF SCRIPT
 # ==============================================================================
+
 
