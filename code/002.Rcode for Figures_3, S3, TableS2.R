@@ -1,37 +1,48 @@
-# ============================================================================
-# Two-part Bayesian SEM for naturalization
-# No user-defined functions: the analysis is written step by step.
-# ============================================================================
+# ==============================================================================
+# Manuscript:   Cultivation facilitates global naturalization
+# Description:  Bayesian SEM linking native range size, cultivation extent, and
+#               naturalization. One hurdle model per group provides three views:
+#               incidence, extent, and overall naturalization success.
+# Outputs:      Four fitted models, three 2 x 2 figures, and Table S2.
+# ==============================================================================
 
-cat("\014")
+# 1. Environment Setup ---------------------------------------------------------
+if (!require("pacman")) install.packages("pacman")
+pacman::p_load(
+  brms,        # Bayesian multivariate models
+  posterior,   # Posterior draws
+  tidyverse,   # Data manipulation and visualization
+  tidygraph,   # Graph objects
+  ggraph,      # SEM path diagrams
+  patchwork,   # Combine panels
+  ragg         # Export PNG figures
+)
+
 rm(list = ls())
+cat("\014")
 
-library(brms)
-library(dplyr)
-library(posterior)
-library(readr)
-library(tidyr)
-library(ggplot2)
+# --- 1.1 Paths and Analysis Settings ---
+# Change project_dir if the data and results are stored elsewhere.
+project_dir <- "E:/中国本地植物归化/sem分析"
+data_file <- file.path(
+  project_dir, "20250530.native_plant.matched.cultivated_plant_DO11.csv"
+)
+result_dir <- file.path(project_dir, "2026.1104.results")
+figure_dir <- file.path(result_dir, "figures")
+model_file <- file.path(result_dir, "models_naturalization_success.RData")
+dir.create(figure_dir, recursive = TRUE, showWarnings = FALSE)
 
-setwd("E:/中国本地植物归化/sem分析")
+n_china <- 10L             # Possible cultivation regions within China
+n_foreign <- 359L          # Possible cultivation regions outside China
+seed_use <- 2024
+total_cores <- parallel::detectCores(logical = TRUE)
+group_labels <- c("All species", "Annual herbs", "Perennial herbs", "Woody plants")
 
-data.file <- "./20250530.native_plant.matched.cultivated_plant_DO11.csv"
-result.dir <- "./2026.1104.results"
-dir.create(result.dir, recursive = TRUE, showWarnings = FALSE)
+# 2. Data Loading & Preprocessing ----------------------------------------------
 
-# Number of possible TDWG level-3 cultivation regions.
-n.China <- 10L
-n.foreign.total <- 359L
-seed.use <- 2024
-
-# ============================================================================
-# 1. Data preparation
-# ============================================================================
-# Remove data without life forms
-native.species <- read_csv(data.file, show_col_types = FALSE) %>%
-  filter(!is.na(life.form.integrated)) 
-
-native.species00 <- native.species %>%
+# --- 2.1 Select Variables and Remove Missing Life Forms ---
+native_flora <- read_csv(data_file, show_col_types = FALSE) %>%
+  filter(!is.na(life.form.integrated)) %>%
   transmute(
     life.form = life.form.integrated,
     native.range = as.integer(native.global.tdwg3),
@@ -39,2062 +50,383 @@ native.species00 <- native.species %>%
     cul.foreign = as.integer(WorldCuP.n.tdwg3),
     nat.incidence = as.integer(nat.incidence),
     nat.extent = as.integer(nat.extent),
-    trials.China = n.China,
-    trials.foreign = n.foreign.total
+    trials.China = n_china,
+    trials.foreign = n_foreign
   )
 
-# ============================================================================
-# 2. Step 1: naturalization incidence
-#    All species; Bernoulli response
-# ============================================================================
+# --- 2.2 Standardize Predictors Within Each Group ---
+# Apply log(x + 1) and z-score scaling separately for each life-form group.
+scale_predictors <- function(data) {
+  data %>%
+    mutate(
+      native.range.scaled = as.numeric(scale(log1p(native.range))),
+      cul.China.scaled = as.numeric(scale(log1p(cul.China))),
+      cul.foreign.scaled = as.numeric(scale(log1p(cul.foreign)))
+    )
+}
 
-# All species
-native.incidence00 <- native.species00 %>%
-  mutate(
-    native.range.scaled = as.numeric(scale(log1p(native.range))),
-    cul.China.scaled = as.numeric(scale(log1p(cul.China))),
-    cul.foreign.scaled = as.numeric(scale(log1p(cul.foreign)))
-  )
-
-# Annual herbs
-native.incidence01 <- native.species00 %>%
-  filter(life.form == "annual herb") %>%
-  mutate(
-    native.range.scaled = as.numeric(scale(log1p(native.range))),
-    cul.China.scaled = as.numeric(scale(log1p(cul.China))),
-    cul.foreign.scaled = as.numeric(scale(log1p(cul.foreign)))
-  )
-
-# Perennial herbs
-native.incidence02 <- native.species00 %>%
-  filter(life.form == "perennial herb") %>%
-  mutate(
-    native.range.scaled = as.numeric(scale(log1p(native.range))),
-    cul.China.scaled = as.numeric(scale(log1p(cul.China))),
-    cul.foreign.scaled = as.numeric(scale(log1p(cul.foreign)))
-  )
-
-# Woody plants
-native.incidence03 <- native.species00 %>%
-  filter(life.form == "woody") %>%
-  mutate(
-    native.range.scaled = as.numeric(scale(log1p(native.range))),
-    cul.China.scaled = as.numeric(scale(log1p(cul.China))),
-    cul.foreign.scaled = as.numeric(scale(log1p(cul.foreign)))
-  )
-
-# Full-species reference data reused by both stages in g-computation.
-reference.list <- list(
-  All = native.incidence00,
-  Annual = native.incidence01,
-  Perennial = native.incidence02,
-  Woody = native.incidence03
+data_groups <- list(
+  all = scale_predictors(native_flora),
+  annual = scale_predictors(filter(native_flora, life.form == "annual herb")),
+  perennial = scale_predictors(filter(native_flora, life.form == "perennial herb")),
+  woody = scale_predictors(filter(native_flora, life.form == "woody"))
 )
 
+# 3. Statistical Modeling ------------------------------------------------------
 
-# ============================================================================
-# naturalization success BSEM formulas
-formula.success.cul.China <- bf(
+# --- 3.1 Define the Bayesian SEM ---
+formula_china <- bf(
   cul.China | trials(trials.China) ~ native.range.scaled,
   family = beta_binomial(link = "logit")
 )
 
-formula.success.cul.foreign <- bf(
+formula_foreign <- bf(
   cul.foreign | trials(trials.foreign) ~
     cul.China.scaled + native.range.scaled,
   family = beta_binomial(link = "logit")
 )
 
-
-# Naturalization: hurdle negative binomial model
-formula.nat.success <- bf(
-  # 正计数部分：零截断负二项分布
+formula_naturalization <- bf(
+  # Positive-count component: zero-truncated negative binomial
   nat.extent ~
     cul.foreign.scaled + cul.China.scaled + native.range.scaled,
-  
-  # 零值部分：预测 P(nat.extent = 0)
+  # Hurdle component: probability of zero naturalization extent
   hu ~
     cul.foreign.scaled + cul.China.scaled + native.range.scaled,
-  
-  family = hurdle_negbinomial(
-    link = "log",
-    link_hu = "logit"
+  family = hurdle_negbinomial(link = "log", link_hu = "logit")
+)
+
+model_formula <- formula_china + formula_foreign +
+  formula_naturalization + set_rescor(FALSE)
+
+# --- 3.2 Fit the Same Model to Each Group ---
+fit_success_model <- function(data) {
+  brm(
+    model_formula,
+    data = data,
+    chains = 4,
+    cores = total_cores / 4,
+    iter = 2000,
+    seed = seed_use
   )
-)
-total.cores <- parallel::detectCores(logical = TRUE)
+}
 
-# Model 00: all naturalized species
-model.success00 <- brm(
-  formula.success.cul.China +
-    formula.success.cul.foreign +
-    formula.nat.success +
-    set_rescor(FALSE),
-  data = native.incidence00,
-  chains = 4,
-  cores = total.cores/4,
-  iter = 2000,
-  seed = seed.use
-)
-
-# Model 01: naturalized annual herbs
-model.success01 <- brm(
-  formula.success.cul.China +
-    formula.success.cul.foreign +
-    formula.nat.success +
-    set_rescor(FALSE),
-  data = native.incidence01,
-  chains = 4,
-  cores = total.cores/4,
-  iter = 2000,
-  seed = seed.use
-)
-
-# Model 02: naturalized perennial herbs
-model.success02 <- brm(
-  formula.success.cul.China +
-    formula.success.cul.foreign +
-    formula.nat.success +
-    set_rescor(FALSE),
-  data = native.incidence02,
-  chains = 4,
-  cores = total.cores/4,
-  iter = 2000,
-  seed = seed.use
-)
-
-# Model 03: naturalized woody plants
-model.success03 <- brm(
-  formula.success.cul.China +
-    formula.success.cul.foreign +
-    formula.nat.success +
-    set_rescor(FALSE),
-  data = native.incidence03,
-  chains = 4,
-  cores = total.cores/4,
-  iter = 2000,
-  seed = seed.use
-)
-
-summary(model.success00)
-summary(model.success01)
-summary(model.success02)
-summary(model.success03)
+# Keep the original object names for compatibility with existing RData files.
+model.success00 <- fit_success_model(data_groups$all)
+model.success01 <- fit_success_model(data_groups$annual)
+model.success02 <- fit_success_model(data_groups$perennial)
+model.success03 <- fit_success_model(data_groups$woody)
 
 save(
-  model.success00,
-  model.success01,
-  model.success02,
-  model.success03,
-  file = file.path(result.dir, "models_naturalization_success.RData")
+  model.success00, model.success01, model.success02, model.success03,
+  file = model_file
 )
 
-# ============================================================================
-# Three complementary path diagrams from ONE fitted hurdle BSEM.
-# Three separate 2 x 2 figures: incidence, extent, overall hurdle success.
-# A = All species; B = Annual herbs; C = Perennial herbs; D = Woody plants.
-# Cultivation outside China is on the LEFT; within China is on the RIGHT.
-# All plotting panels are written out explicitly for straightforward editing.
-# ============================================================================
+# For plotting saved models only: run Section 1, load(model_file), then Sections 4-7.
 
-cat("\014")
-rm(list = ls())
+# 4. Posterior Effects for Path Diagrams ---------------------------------------
+models <- list(
+  all = model.success00,
+  annual = model.success01,
+  perennial = model.success02,
+  woody = model.success03
+)
 
-library(brms)
-library(dplyr)
-library(tibble)
-library(stringr)
-library(igraph)
-library(ggraph)
-library(tidygraph)
-library(patchwork)
-library(ggplot2)
+for (model in models) print(summary(model))
 
-setwd("E:/中国本地植物归化/sem分析")
+outcome_labels <- c(
+  incidence = "Naturalization incidence",
+  extent = "Naturalization extent",
+  success = "Naturalization success"
+)
 
-data.file <- "./20250530.native_plant.matched.cultivated_plant_DO11.csv"
-result.dir <- "./2026.1104.results"
-figure.dir <- file.path(result.dir, "figures")
-dir.create(result.dir, recursive = TRUE, showWarnings = FALSE)
+outcome_scales <- c(
+  incidence = "logit_P_positive",
+  extent = "log_mu_positive_component",
+  success = "mean_d_logEY_dx"
+)
 
-# The only model file read by this script.
-load(file.path(result.dir, "models_naturalization_success.RData"))
-
-# Incidence outcome: logit P(Y>0) = -logit hu (sign reversal is essential).
-# Extent outcome: log mu in the zero-truncated negative binomial component.
-# Success outcome: average local slope of log E[Y|X], combining hu and mu.
-# Cultivation equations are shared across all three views of each model.
-
-
-# For the hurdle negative binomial, E[Y|X] = (1-hu)*mu/(1-P_NB(0)).
-# Each outcome edge is the empirical mean of d log(E[Y|X])/d x_j,
-# holding the other predictors fixed. These are direct associations, not
-# total SEM effects through cultivation mediators or original brms slopes.
-# Identical predictor profiles are frequency-weighted, using every model row.
+# --- 4.1 Integrate the Hurdle and Count Components for Overall Success ---
+# E[Y|X] = (1 - hu) * mu / (1 - P_NB(0)).
+# Each outcome edge is the mean local slope d log(E[Y|X]) / d x_j.
+# These are direct associations, not total effects through cultivation mediators.
+# Repeated predictor profiles are frequency-weighted; draws use batches of 128.
 overall_success_draws <- function(model) {
   predictors <- c("native.range.scaled", "cul.China.scaled", "cul.foreign.scaled")
   x <- model$data[, predictors, drop = FALSE]
-  if (anyNA(x) || any(!is.finite(as.matrix(x)))) stop("Non-finite success predictors.")
+  if (anyNA(x) || any(!is.finite(as.matrix(x)))) {
+    stop("Non-finite success predictors.")
+  }
+
   profiles <- stats::aggregate(rep(1, nrow(x)), by = x, FUN = length)
   weights <- profiles$x / nrow(x)
   design <- t(as.matrix(profiles[, predictors, drop = FALSE]))
+
   coefficients <- brms::fixef(model, summary = FALSE)
-  shape <- as.numeric(posterior::as_draws_matrix(model, variable = "shape_natextent"))
-  mu.slopes <- coefficients[, paste0("natextent_", predictors), drop = FALSE]
-  hu.slopes <- coefficients[, paste0("hu_natextent_", predictors), drop = FALSE]
-  effects <- matrix(NA_real_, nrow(coefficients), length(predictors),
-                    dimnames = list(NULL, paste0("natextent_", predictors)))
+  shape <- as.numeric(
+    posterior::as_draws_matrix(model, variable = "shape_natextent")
+  )
+  mu_slopes <- coefficients[, paste0("natextent_", predictors), drop = FALSE]
+  hu_slopes <- coefficients[, paste0("hu_natextent_", predictors), drop = FALSE]
+  effects <- matrix(
+    NA_real_, nrow(coefficients), length(predictors),
+    dimnames = list(NULL, paste0("natextent_", predictors))
+  )
+
   for (first in seq(1L, nrow(coefficients), by = 128L)) {
     ids <- first:min(first + 127L, nrow(coefficients))
-    mu <- exp(sweep(mu.slopes[ids, , drop = FALSE] %*% design, 1,
-                    coefficients[ids, "natextent_Intercept"], "+"))
-    hu <- plogis(sweep(hu.slopes[ids, , drop = FALSE] %*% design, 1,
-                       coefficients[ids, "hu_natextent_Intercept"], "+"))
+    mu <- exp(sweep(
+      mu_slopes[ids, , drop = FALSE] %*% design,
+      1, coefficients[ids, "natextent_Intercept"], "+"
+    ))
+    hu <- plogis(sweep(
+      hu_slopes[ids, , drop = FALSE] %*% design,
+      1, coefficients[ids, "hu_natextent_Intercept"], "+"
+    ))
+
     r <- matrix(shape[ids], nrow = length(ids), ncol = ncol(design))
-    log.p0 <- -r * log1p(mu / r)
-    # d log[mu/(1-P_NB(0))] / d log(mu), evaluated stably.
-    sensitivity.mu <- 1 - (mu * r / (mu + r)) / expm1(-log.p0)
-    mean.sensitivity <- as.vector(sensitivity.mu %*% weights)
-    mean.hu <- as.vector(hu %*% weights)
-    effects[ids, ] <- sweep(mu.slopes[ids, , drop = FALSE], 1, mean.sensitivity, "*") -
-      sweep(hu.slopes[ids, , drop = FALSE], 1, mean.hu, "*")
+    log_p0 <- -r * log1p(mu / r)
+    # Derivative of log[mu / (1 - P_NB(0))] with respect to log(mu).
+    sensitivity_mu <- 1 - (mu * r / (mu + r)) / expm1(-log_p0)
+    mean_sensitivity <- as.vector(sensitivity_mu %*% weights)
+    mean_hu <- as.vector(hu %*% weights)
+
+    effects[ids, ] <-
+      sweep(mu_slopes[ids, , drop = FALSE], 1, mean_sensitivity, "*") -
+      sweep(hu_slopes[ids, , drop = FALSE], 1, mean_hu, "*")
   }
-  if (any(!is.finite(effects))) stop("Non-finite integrated success effects.")
-  effects
+
+  if (any(!is.finite(effects))) {
+    stop("Non-finite integrated success effects.")
+  }
+  return(effects)
 }
 
+# --- 4.2 Extract Draws for Each Naturalization Outcome ---
+extract_path_draws <- function(model, outcome) {
+  fixed_draws <- brms::fixef(model, summary = FALSE)
 
-# ============================================================================
-# Incidence - All species
-# ============================================================================
-
-fixed.draws.inc.all <- fixef(model.success00, summary = FALSE)
-fixed.draws.inc.all <- fixed.draws.inc.all[, str_detect(colnames(fixed.draws.inc.all), "^(culChina_|culforeign_|hu_natextent_)"), drop = FALSE]
-hu.columns.inc.all <- str_starts(colnames(fixed.draws.inc.all), "hu_natextent_")
-fixed.draws.inc.all[, hu.columns.inc.all] <- -fixed.draws.inc.all[, hu.columns.inc.all]
-colnames(fixed.draws.inc.all) <- str_replace(colnames(fixed.draws.inc.all), "^hu_natextent_", "natincidence_")
-
-fixed.summary.inc.all <- tibble(
-  Parameter = colnames(fixed.draws.inc.all),
-  Median = apply(fixed.draws.inc.all, 2, median),
-  CI.low = apply(fixed.draws.inc.all, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.inc.all, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.inc.all > 0),
-  P.negative = colMeans(fixed.draws.inc.all < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natincidence_") ~ "Naturalization incidence"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natincidence_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.inc.all <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization incidence"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nincidence"
-  )
-)
-
-edge.data.inc.all <- fixed.summary.inc.all %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
+  if (outcome == "incidence") {
+    fixed_draws <- fixed_draws[
+      , str_detect(colnames(fixed_draws), "^(culChina_|culforeign_|hu_natextent_)"),
+      drop = FALSE
+    ]
+    # logit P(Y > 0) = -logit(hu): reverse the hurdle coefficients.
+    hu_columns <- str_starts(colnames(fixed_draws), "hu_natextent_")
+    fixed_draws[, hu_columns] <- -fixed_draws[, hu_columns]
+    colnames(fixed_draws) <- str_replace(
+      colnames(fixed_draws), "^hu_natextent_", "natincidence_"
     )
+  } else {
+    # Extent uses log(mu) coefficients from the positive-count component.
+    fixed_draws <- fixed_draws[
+      , !str_starts(colnames(fixed_draws), "hu_"), drop = FALSE
+    ]
+
+    if (outcome == "success") {
+      # Replace outcome slopes with integrated success effects before summarizing.
+      overall_draws <- overall_success_draws(model)
+      fixed_draws[, colnames(overall_draws)] <- overall_draws
+      colnames(fixed_draws) <- str_replace(
+        colnames(fixed_draws), "^natextent_", "natsuccess_"
+      )
+    }
+  }
+
+  return(fixed_draws)
+}
+
+# --- 4.3 Summarize Coefficients and Identify Diagram Edges ---
+summarize_paths <- function(fixed_draws, outcome_label) {
+  tibble(
+    Parameter = colnames(fixed_draws),
+    Median = apply(fixed_draws, 2, median),
+    CI.low = apply(fixed_draws, 2, quantile, probs = 0.025),
+    CI.high = apply(fixed_draws, 2, quantile, probs = 0.975),
+    P.positive = colMeans(fixed_draws > 0),
+    P.negative = colMeans(fixed_draws < 0)
   ) %>%
-  select(from, to, label, Direction, Supported, label.position)
+    mutate(P.direction = pmax(P.positive, P.negative)) %>%
+    filter(!str_detect(Parameter, "Intercept$")) %>%
+    mutate(
+      to = case_when(
+        str_starts(Parameter, "culChina_") ~ "Cultivation within China",
+        str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
+        str_detect(Parameter, "^(natincidence_|natextent_|natsuccess_)") ~
+          outcome_label
+      ),
+      term = str_remove(
+        Parameter, "^(culChina_|culforeign_|natincidence_|natextent_|natsuccess_)"
+      ),
+      from = case_when(
+        term == "native.range.scaled" ~ "Native range size",
+        term == "cul.China.scaled" ~ "Cultivation within China",
+        term == "cul.foreign.scaled" ~ "Cultivation outside China"
+      ),
+      Supported = CI.low > 0 | CI.high < 0,
+      Direction = case_when(
+        Supported & Median > 0 ~ "Positive",
+        Supported & Median < 0 ~ "Negative",
+        TRUE ~ "Uncertain"
+      ),
+      Star = case_when(
+        P.direction > 0.999 ~ "***",
+        P.direction > 0.99 ~ "**",
+        P.direction > 0.95 ~ "*",
+        TRUE ~ ""
+      ),
+      label = paste0(formatC(Median, digits = 2, format = "f"), Star)
+    )
+}
 
-graph.inc.all <- tbl_graph(
-  nodes = node.data.inc.all,
-  edges = edge.data.inc.all,
-  directed = TRUE
+# 5. Visualization Setup -------------------------------------------------------
+
+# --- 5.1 Shared Colors and Theme ---
+color_palette <- c(
+  Positive = "#C44E52",
+  Negative = "#3B6FB6",
+  Uncertain = "#9B9B9B"
 )
 
-plot.inc.all <- ggraph(
-  graph.inc.all,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.inc.all,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("A   All species (n = 25,129)", nrow(model.success00$data))) +
+theme_standard <- theme_graph(base_family = "sans") +
   theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
+    plot.title = element_text(
+      size = 13, face = "bold", hjust = 0, margin = margin(b = 4)
+    ),
     plot.margin = margin(8, 8, 8, 8)
   )
 
-
-# ============================================================================
-# Incidence - Annual herbs
-# ============================================================================
-
-fixed.draws.inc.annual <- fixef(model.success01, summary = FALSE)
-fixed.draws.inc.annual <- fixed.draws.inc.annual[, str_detect(colnames(fixed.draws.inc.annual), "^(culChina_|culforeign_|hu_natextent_)"), drop = FALSE]
-hu.columns.inc.annual <- str_starts(colnames(fixed.draws.inc.annual), "hu_natextent_")
-fixed.draws.inc.annual[, hu.columns.inc.annual] <- -fixed.draws.inc.annual[, hu.columns.inc.annual]
-colnames(fixed.draws.inc.annual) <- str_replace(colnames(fixed.draws.inc.annual), "^hu_natextent_", "natincidence_")
-
-fixed.summary.inc.annual <- tibble(
-  Parameter = colnames(fixed.draws.inc.annual),
-  Median = apply(fixed.draws.inc.annual, 2, median),
-  CI.low = apply(fixed.draws.inc.annual, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.inc.annual, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.inc.annual > 0),
-  P.negative = colMeans(fixed.draws.inc.annual < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natincidence_") ~ "Naturalization incidence"
+# --- 5.2 Draw One SEM Panel ---
+# Layout: native range at the top; cultivation outside China on the left;
+# cultivation within China on the right; naturalization outcome at the bottom.
+plot_sem_paths <- function(path_summary, outcome_label, panel_title) {
+  node_data <- tibble(
+    name = c(
+      "Native range size", "Cultivation within China",
+      "Cultivation outside China", outcome_label
     ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natincidence_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
+    x = c(0, 1, -1, 0),
+    y = c(1.15, 0, 0, -1.15),
+    display = c(
+      "Native range size", "Cultivation\nwithin China",
+      "Cultivation\noutside China",
+      str_replace(outcome_label, "Naturalization ", "Naturalization\n")
+    )
   )
 
-node.data.inc.annual <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization incidence"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nincidence"
+  edge_data <- path_summary %>%
+    mutate(
+      label.position = case_when(
+        from == "Cultivation within China" &
+          to == "Cultivation outside China" ~ 0.42,
+        from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
+        TRUE ~ 0.50
+      )
+    ) %>%
+    select(from, to, label, Direction, Supported, label.position)
+
+  graph <- tbl_graph(nodes = node_data, edges = edge_data, directed = TRUE)
+
+  ggraph(graph, layout = "manual", x = x, y = y) +
+    geom_edge_link(
+      aes(
+        label = label, colour = Direction,
+        linetype = Supported, label_pos = label.position
+      ),
+      linewidth = 0.75,
+      angle_calc = "along",
+      label_dodge = grid::unit(3.2, "mm"),
+      label_size = 4.2,
+      label_colour = "black",
+      start_cap = circle(10, "mm"),
+      end_cap = rectangle(
+        width = 36, height = 18, width_unit = "mm", height_unit = "mm"
+      ),
+      arrow = grid::arrow(length = grid::unit(2.6, "mm"), type = "closed"),
+      show.legend = FALSE
+    ) +
+    geom_label(
+      aes(x = x, y = y, label = display),
+      data = node_data,
+      size = 4.3,
+      family = "sans",
+      fontface = "bold",
+      colour = "black",
+      fill = "white",
+      linewidth = 0.35,
+      label.padding = grid::unit(2.2, "mm"),
+      label.r = grid::unit(1.5, "mm")
+    ) +
+    scale_edge_colour_manual(values = color_palette) +
+    scale_edge_linetype_manual(values = c(`TRUE` = "solid", `FALSE` = "dashed")) +
+    coord_cartesian(
+      xlim = c(-1.55, 1.55), ylim = c(-1.55, 1.55), clip = "off"
+    ) +
+    theme_standard +
+    labs(title = panel_title)
+}
+
+# 6. Generate Publication Figures ----------------------------------------------
+# Each figure uses the same four groups: A = all species; B = annual herbs;
+# C = perennial herbs; D = woody plants. Panel sample sizes come from model data.
+figures <- list()
+path_summaries <- list()
+
+for (outcome in names(outcome_labels)) {
+  outcome_label <- outcome_labels[[outcome]]
+  panels <- list()
+
+  for (i in seq_along(models)) {
+    model <- models[[i]]
+    fixed_draws <- extract_path_draws(model, outcome)
+    path_summary <- summarize_paths(fixed_draws, outcome_label)
+
+    panel_title <- sprintf(
+      "%s   %s (n = %s)", LETTERS[i], group_labels[i],
+      format(nrow(model$data), big.mark = ",", trim = TRUE)
+    )
+    panels[[i]] <- plot_sem_paths(path_summary, outcome_label, panel_title)
+
+    # Keep the original Table S2 columns and the outcome/group row order.
+    path_summaries[[paste(outcome, names(models)[i], sep = "_")]] <-
+      path_summary %>%
+      mutate(
+        Figure = outcome,
+        Group = group_labels[i],
+        Scale = if_else(
+          str_starts(to, "Naturalization"),
+          outcome_scales[[outcome]], "cultivation_logit_coefficient"
+        )
+      )
+  }
+
+  figure <- wrap_plots(panels, ncol = 2, nrow = 2, byrow = TRUE) +
+    plot_annotation(
+      title = outcome_label,
+      theme = theme(
+        plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
+        plot.background = element_rect(fill = "white", colour = NA)
+      )
+    )
+  figures[[outcome]] <- figure
+
+  ragg::agg_png(
+    file.path(figure_dir, paste0("BSEM_hurdle_", outcome, ".png")),
+    width = 260 / 25.4, height = 230 / 25.4, units = "in", res = 300
   )
+  print(figure)
+  dev.off()
+}
+
+# 7. Export Path Coefficients (Table S2) ----------------------------------------
+# Three outcomes x four groups x six paths = 72 rows.
+path_summary <- bind_rows(path_summaries)
+write.csv(
+  path_summary,
+  file.path(figure_dir, "TableS2_BSEM_hurdle_coefficients.csv"),
+  row.names = FALSE
 )
 
-edge.data.inc.annual <- fixed.summary.inc.annual %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.inc.annual <- tbl_graph(
-  nodes = node.data.inc.annual,
-  edges = edge.data.inc.annual,
-  directed = TRUE
-)
-
-plot.inc.annual <- ggraph(
-  graph.inc.annual,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.inc.annual,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("B   Annual herbs (n = 2,002)", nrow(model.success01$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Incidence - Perennial herbs
-# ============================================================================
-
-fixed.draws.inc.perennial <- fixef(model.success02, summary = FALSE)
-fixed.draws.inc.perennial <- fixed.draws.inc.perennial[, str_detect(colnames(fixed.draws.inc.perennial), "^(culChina_|culforeign_|hu_natextent_)"), drop = FALSE]
-hu.columns.inc.perennial <- str_starts(colnames(fixed.draws.inc.perennial), "hu_natextent_")
-fixed.draws.inc.perennial[, hu.columns.inc.perennial] <- -fixed.draws.inc.perennial[, hu.columns.inc.perennial]
-colnames(fixed.draws.inc.perennial) <- str_replace(colnames(fixed.draws.inc.perennial), "^hu_natextent_", "natincidence_")
-
-fixed.summary.inc.perennial <- tibble(
-  Parameter = colnames(fixed.draws.inc.perennial),
-  Median = apply(fixed.draws.inc.perennial, 2, median),
-  CI.low = apply(fixed.draws.inc.perennial, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.inc.perennial, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.inc.perennial > 0),
-  P.negative = colMeans(fixed.draws.inc.perennial < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natincidence_") ~ "Naturalization incidence"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natincidence_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.inc.perennial <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization incidence"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nincidence"
-  )
-)
-
-edge.data.inc.perennial <- fixed.summary.inc.perennial %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.inc.perennial <- tbl_graph(
-  nodes = node.data.inc.perennial,
-  edges = edge.data.inc.perennial,
-  directed = TRUE
-)
-
-plot.inc.perennial <- ggraph(
-  graph.inc.perennial,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.inc.perennial,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("C   Perennial herbs (n = 13,772)", nrow(model.success02$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Incidence - Woody plants
-# ============================================================================
-
-fixed.draws.inc.woody <- fixef(model.success03, summary = FALSE)
-fixed.draws.inc.woody <- fixed.draws.inc.woody[, str_detect(colnames(fixed.draws.inc.woody), "^(culChina_|culforeign_|hu_natextent_)"), drop = FALSE]
-hu.columns.inc.woody <- str_starts(colnames(fixed.draws.inc.woody), "hu_natextent_")
-fixed.draws.inc.woody[, hu.columns.inc.woody] <- -fixed.draws.inc.woody[, hu.columns.inc.woody]
-colnames(fixed.draws.inc.woody) <- str_replace(colnames(fixed.draws.inc.woody), "^hu_natextent_", "natincidence_")
-
-fixed.summary.inc.woody <- tibble(
-  Parameter = colnames(fixed.draws.inc.woody),
-  Median = apply(fixed.draws.inc.woody, 2, median),
-  CI.low = apply(fixed.draws.inc.woody, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.inc.woody, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.inc.woody > 0),
-  P.negative = colMeans(fixed.draws.inc.woody < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natincidence_") ~ "Naturalization incidence"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natincidence_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.inc.woody <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization incidence"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nincidence"
-  )
-)
-
-edge.data.inc.woody <- fixed.summary.inc.woody %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.inc.woody <- tbl_graph(
-  nodes = node.data.inc.woody,
-  edges = edge.data.inc.woody,
-  directed = TRUE
-)
-
-plot.inc.woody <- ggraph(
-  graph.inc.woody,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.inc.woody,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("D   Woody plants (n = 9,355)", nrow(model.success03$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Combine incidence: All species / Annual herbs; Perennial herbs / Woody plants.
-# ============================================================================
-figure.incidence <- wrap_plots(
-  plot.inc.all, plot.inc.annual, plot.inc.perennial, plot.inc.woody,
-  ncol = 2, nrow = 2, byrow = TRUE
-) +
-  plot_annotation(
-    title = "Naturalization incidence",
-    theme = theme(
-      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
-      plot.background = element_rect(fill = "white", colour = NA)
-    )
-  )
-
-output.incidence <- file.path(figure.dir, "BSEM_hurdle_incidence")
-
-ragg::agg_png(paste0(output.incidence, ".png"), width = 260/25.4, height = 230/25.4,
-              units = "in", res = 300)
-print(figure.incidence)
-dev.off()
-
-
-# ============================================================================
-# Extent - All species
-# ============================================================================
-
-fixed.draws.ext.all <- fixef(model.success00, summary = FALSE)
-fixed.draws.ext.all <- fixed.draws.ext.all[, !str_starts(colnames(fixed.draws.ext.all), "hu_"), drop = FALSE]
-
-fixed.summary.ext.all <- tibble(
-  Parameter = colnames(fixed.draws.ext.all),
-  Median = apply(fixed.draws.ext.all, 2, median),
-  CI.low = apply(fixed.draws.ext.all, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.ext.all, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.ext.all > 0),
-  P.negative = colMeans(fixed.draws.ext.all < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natextent_") ~ "Naturalization extent"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natextent_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.ext.all <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization extent"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nextent"
-  )
-)
-
-edge.data.ext.all <- fixed.summary.ext.all %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.ext.all <- tbl_graph(
-  nodes = node.data.ext.all,
-  edges = edge.data.ext.all,
-  directed = TRUE
-)
-
-plot.ext.all <- ggraph(
-  graph.ext.all,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.ext.all,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("A   All species (n = 25,129)", nrow(model.success00$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Extent - Annual herbs
-# ============================================================================
-
-fixed.draws.ext.annual <- fixef(model.success01, summary = FALSE)
-fixed.draws.ext.annual <- fixed.draws.ext.annual[, !str_starts(colnames(fixed.draws.ext.annual), "hu_"), drop = FALSE]
-
-fixed.summary.ext.annual <- tibble(
-  Parameter = colnames(fixed.draws.ext.annual),
-  Median = apply(fixed.draws.ext.annual, 2, median),
-  CI.low = apply(fixed.draws.ext.annual, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.ext.annual, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.ext.annual > 0),
-  P.negative = colMeans(fixed.draws.ext.annual < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natextent_") ~ "Naturalization extent"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natextent_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.ext.annual <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization extent"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nextent"
-  )
-)
-
-edge.data.ext.annual <- fixed.summary.ext.annual %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.ext.annual <- tbl_graph(
-  nodes = node.data.ext.annual,
-  edges = edge.data.ext.annual,
-  directed = TRUE
-)
-
-plot.ext.annual <- ggraph(
-  graph.ext.annual,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.ext.annual,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("B   Annual herbs (n = 2,002)", nrow(model.success01$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Extent - Perennial herbs
-# ============================================================================
-
-fixed.draws.ext.perennial <- fixef(model.success02, summary = FALSE)
-fixed.draws.ext.perennial <- fixed.draws.ext.perennial[, !str_starts(colnames(fixed.draws.ext.perennial), "hu_"), drop = FALSE]
-
-fixed.summary.ext.perennial <- tibble(
-  Parameter = colnames(fixed.draws.ext.perennial),
-  Median = apply(fixed.draws.ext.perennial, 2, median),
-  CI.low = apply(fixed.draws.ext.perennial, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.ext.perennial, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.ext.perennial > 0),
-  P.negative = colMeans(fixed.draws.ext.perennial < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natextent_") ~ "Naturalization extent"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natextent_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.ext.perennial <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization extent"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nextent"
-  )
-)
-
-edge.data.ext.perennial <- fixed.summary.ext.perennial %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.ext.perennial <- tbl_graph(
-  nodes = node.data.ext.perennial,
-  edges = edge.data.ext.perennial,
-  directed = TRUE
-)
-
-plot.ext.perennial <- ggraph(
-  graph.ext.perennial,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.ext.perennial,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("C   Perennial herbs (n = 13,772)", nrow(model.success02$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Extent - Woody plants
-# ============================================================================
-
-fixed.draws.ext.woody <- fixef(model.success03, summary = FALSE)
-fixed.draws.ext.woody <- fixed.draws.ext.woody[, !str_starts(colnames(fixed.draws.ext.woody), "hu_"), drop = FALSE]
-
-fixed.summary.ext.woody <- tibble(
-  Parameter = colnames(fixed.draws.ext.woody),
-  Median = apply(fixed.draws.ext.woody, 2, median),
-  CI.low = apply(fixed.draws.ext.woody, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.ext.woody, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.ext.woody > 0),
-  P.negative = colMeans(fixed.draws.ext.woody < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natextent_") ~ "Naturalization extent"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natextent_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.ext.woody <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization extent"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nextent"
-  )
-)
-
-edge.data.ext.woody <- fixed.summary.ext.woody %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.ext.woody <- tbl_graph(
-  nodes = node.data.ext.woody,
-  edges = edge.data.ext.woody,
-  directed = TRUE
-)
-
-plot.ext.woody <- ggraph(
-  graph.ext.woody,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.ext.woody,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("D   Woody plants (n = 9,355)", nrow(model.success03$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Combine extent: All species / Annual herbs; Perennial herbs / Woody plants.
-# ============================================================================
-figure.extent <- wrap_plots(
-  plot.ext.all, plot.ext.annual, plot.ext.perennial, plot.ext.woody,
-  ncol = 2, nrow = 2, byrow = TRUE
-) +
-  plot_annotation(
-    title = "Naturalization extent",
-    theme = theme(
-      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
-      plot.background = element_rect(fill = "white", colour = NA)
-    )
-  )
-
-output.extent <- file.path(figure.dir, "BSEM_hurdle_extent")
-
-ragg::agg_png(paste0(output.extent, ".png"), width = 260/25.4, height = 230/25.4,
-              units = "in", res = 300)
-print(figure.extent)
-dev.off()
-
-# ============================================================================
-# Success - All species
-# ============================================================================
-
-fixed.draws.suc.all <- fixef(model.success00, summary = FALSE)
-# Integrate hu and mu before summarising; retain a single success node.
-overall.draws.suc.all <- overall_success_draws(model.success00)
-fixed.draws.suc.all <- fixed.draws.suc.all[, !str_starts(colnames(fixed.draws.suc.all), "hu_"), drop = FALSE]
-fixed.draws.suc.all[, colnames(overall.draws.suc.all)] <- overall.draws.suc.all
-colnames(fixed.draws.suc.all) <- str_replace(colnames(fixed.draws.suc.all), "^natextent_", "natsuccess_")
-
-
-fixed.summary.suc.all <- tibble(
-  Parameter = colnames(fixed.draws.suc.all),
-  Median = apply(fixed.draws.suc.all, 2, median),
-  CI.low = apply(fixed.draws.suc.all, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.suc.all, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.suc.all > 0),
-  P.negative = colMeans(fixed.draws.suc.all < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natsuccess_") ~ "Naturalization success"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natsuccess_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.suc.all <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization success"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nsuccess"
-  )
-)
-
-edge.data.suc.all <- fixed.summary.suc.all %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.suc.all <- tbl_graph(
-  nodes = node.data.suc.all,
-  edges = edge.data.suc.all,
-  directed = TRUE
-)
-
-plot.suc.all <- ggraph(
-  graph.suc.all,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.suc.all,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("A   All species (n = 25,129)", nrow(model.success00$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Success - Annual herbs
-# ============================================================================
-
-fixed.draws.suc.annual <- fixef(model.success01, summary = FALSE)
-# Integrate hu and mu before summarising; retain a single success node.
-overall.draws.suc.annual <- overall_success_draws(model.success01)
-fixed.draws.suc.annual <- fixed.draws.suc.annual[, !str_starts(colnames(fixed.draws.suc.annual), "hu_"), drop = FALSE]
-fixed.draws.suc.annual[, colnames(overall.draws.suc.annual)] <- overall.draws.suc.annual
-colnames(fixed.draws.suc.annual) <- str_replace(colnames(fixed.draws.suc.annual), "^natextent_", "natsuccess_")
-
-
-fixed.summary.suc.annual <- tibble(
-  Parameter = colnames(fixed.draws.suc.annual),
-  Median = apply(fixed.draws.suc.annual, 2, median),
-  CI.low = apply(fixed.draws.suc.annual, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.suc.annual, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.suc.annual > 0),
-  P.negative = colMeans(fixed.draws.suc.annual < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natsuccess_") ~ "Naturalization success"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natsuccess_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.suc.annual <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization success"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nsuccess"
-  )
-)
-
-edge.data.suc.annual <- fixed.summary.suc.annual %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.suc.annual <- tbl_graph(
-  nodes = node.data.suc.annual,
-  edges = edge.data.suc.annual,
-  directed = TRUE
-)
-
-plot.suc.annual <- ggraph(
-  graph.suc.annual,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.suc.annual,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("B   Annual herbs (n = 2,002)", nrow(model.success01$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Success - Perennial herbs
-# ============================================================================
-
-fixed.draws.suc.perennial <- fixef(model.success02, summary = FALSE)
-# Integrate hu and mu before summarising; retain a single success node.
-overall.draws.suc.perennial <- overall_success_draws(model.success02)
-fixed.draws.suc.perennial <- fixed.draws.suc.perennial[, !str_starts(colnames(fixed.draws.suc.perennial), "hu_"), drop = FALSE]
-fixed.draws.suc.perennial[, colnames(overall.draws.suc.perennial)] <- overall.draws.suc.perennial
-colnames(fixed.draws.suc.perennial) <- str_replace(colnames(fixed.draws.suc.perennial), "^natextent_", "natsuccess_")
-
-
-fixed.summary.suc.perennial <- tibble(
-  Parameter = colnames(fixed.draws.suc.perennial),
-  Median = apply(fixed.draws.suc.perennial, 2, median),
-  CI.low = apply(fixed.draws.suc.perennial, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.suc.perennial, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.suc.perennial > 0),
-  P.negative = colMeans(fixed.draws.suc.perennial < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natsuccess_") ~ "Naturalization success"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natsuccess_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.suc.perennial <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization success"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nsuccess"
-  )
-)
-
-edge.data.suc.perennial <- fixed.summary.suc.perennial %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.suc.perennial <- tbl_graph(
-  nodes = node.data.suc.perennial,
-  edges = edge.data.suc.perennial,
-  directed = TRUE
-)
-
-plot.suc.perennial <- ggraph(
-  graph.suc.perennial,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.suc.perennial,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("C   Perennial herbs (n = 13,772)", nrow(model.success02$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Success - Woody plants
-# ============================================================================
-
-fixed.draws.suc.woody <- fixef(model.success03, summary = FALSE)
-# Integrate hu and mu before summarising; retain a single success node.
-overall.draws.suc.woody <- overall_success_draws(model.success03)
-fixed.draws.suc.woody <- fixed.draws.suc.woody[, !str_starts(colnames(fixed.draws.suc.woody), "hu_"), drop = FALSE]
-fixed.draws.suc.woody[, colnames(overall.draws.suc.woody)] <- overall.draws.suc.woody
-colnames(fixed.draws.suc.woody) <- str_replace(colnames(fixed.draws.suc.woody), "^natextent_", "natsuccess_")
-
-
-fixed.summary.suc.woody <- tibble(
-  Parameter = colnames(fixed.draws.suc.woody),
-  Median = apply(fixed.draws.suc.woody, 2, median),
-  CI.low = apply(fixed.draws.suc.woody, 2, quantile, probs = 0.025),
-  CI.high = apply(fixed.draws.suc.woody, 2, quantile, probs = 0.975),
-  P.positive = colMeans(fixed.draws.suc.woody > 0),
-  P.negative = colMeans(fixed.draws.suc.woody < 0)
-) %>%
-  mutate(P.direction = pmax(P.positive, P.negative)) %>%
-  filter(!str_detect(Parameter, "Intercept$")) %>%
-  mutate(
-    to = case_when(
-      str_starts(Parameter, "culChina_") ~ "Cultivation within China",
-      str_starts(Parameter, "culforeign_") ~ "Cultivation outside China",
-      str_starts(Parameter, "natsuccess_") ~ "Naturalization success"
-    ),
-    term = str_remove(Parameter, "^(culChina_|culforeign_|natsuccess_)"),
-    from = case_when(
-      term == "native.range.scaled" ~ "Native range size",
-      term == "cul.China.scaled" ~ "Cultivation within China",
-      term == "cul.foreign.scaled" ~ "Cultivation outside China"
-    ),
-    Supported = CI.low > 0 | CI.high < 0,
-    Direction = case_when(
-      Supported & Median > 0 ~ "Positive",
-      Supported & Median < 0 ~ "Negative",
-      TRUE ~ "Uncertain"
-    ),
-    Star = case_when(
-      P.direction > 0.999 ~ "***",
-      P.direction > 0.99 ~ "**",
-      P.direction > 0.95 ~ "*",
-      TRUE ~ ""
-    ),
-    label = paste0(formatC(Median, digits = 2, format = "f"), Star)
-  )
-
-node.data.suc.woody <- tibble(
-  name = c(
-    "Native range size",
-    "Cultivation within China",
-    "Cultivation outside China",
-    "Naturalization success"
-  ),
-  x = c(0, 1, -1, 0),
-  y = c(1.15, 0, 0, -1.15),
-  display = c(
-    "Native range size",
-    "Cultivation\nwithin China",
-    "Cultivation\noutside China",
-    "Naturalization\nsuccess"
-  )
-)
-
-edge.data.suc.woody <- fixed.summary.suc.woody %>%
-  mutate(
-    label.position = case_when(
-      from == "Cultivation within China" & to == "Cultivation outside China" ~ 0.42,
-      from == "Native range size" & str_starts(to, "Naturalization") ~ 0.30,
-      TRUE ~ 0.50
-    )
-  ) %>%
-  select(from, to, label, Direction, Supported, label.position)
-
-graph.suc.woody <- tbl_graph(
-  nodes = node.data.suc.woody,
-  edges = edge.data.suc.woody,
-  directed = TRUE
-)
-
-plot.suc.woody <- ggraph(
-  graph.suc.woody,
-  layout = "manual",
-  x = x,
-  y = y
-) +
-  geom_edge_link(
-    aes(
-      label = label,
-      colour = Direction,
-      linetype = Supported,
-      label_pos = label.position
-    ),
-    linewidth = 0.75,
-    angle_calc = "along",
-    label_dodge = grid::unit(3.2, "mm"),
-    label_size = 4.2,
-    label_colour = "black",
-    start_cap = circle(10, "mm"),
-    end_cap = rectangle(
-      width = 36,
-      height = 18,
-      width_unit = "mm",
-      height_unit = "mm"
-    ),
-    arrow = grid::arrow(
-      length = grid::unit(2.6, "mm"),
-      type = "closed"
-    ),
-    show.legend = FALSE
-  ) +
-  geom_label(
-    aes(x = x, y = y, label = display),
-    data = node.data.suc.woody,
-    size = 4.3,
-    family = "sans",
-    fontface = "bold",
-    colour = "black",
-    fill = "white",
-    linewidth = 0.35,
-    label.padding = grid::unit(2.2, "mm"),
-    label.r = grid::unit(1.5, "mm")
-  ) +
-  scale_edge_colour_manual(
-    values = c(
-      Positive = "#C44E52",
-      Negative = "#3B6FB6",
-      Uncertain = "#9B9B9B"
-    )
-  ) +
-  scale_edge_linetype_manual(
-    values = c(`TRUE` = "solid", `FALSE` = "dashed")
-  ) +
-  coord_cartesian(
-    xlim = c(-1.55, 1.55),
-    ylim = c(-1.55, 1.55),
-    clip = "off"
-  ) +
-  theme_graph(base_family = "sans") +
-  labs(title = sprintf("D   Woody plants (n = 9,355)", nrow(model.success03$data))) +
-  theme(
-    plot.title = element_text(size = 13, face = "bold", hjust = 0, margin = margin(b = 4)),
-    plot.margin = margin(8, 8, 8, 8)
-  )
-
-
-# ============================================================================
-# Combine success: All species / Annual herbs; Perennial herbs / Woody plants.
-# ============================================================================
-figure.success <- wrap_plots(
-  plot.suc.all, plot.suc.annual, plot.suc.perennial, plot.suc.woody,
-  ncol = 2, nrow = 2, byrow = TRUE
-) +
-  plot_annotation(
-    title = "Naturalization success",
-    theme = theme(
-      plot.title = element_text(size = 18, face = "bold", hjust = 0.5),
-      plot.background = element_rect(fill = "white", colour = NA)
-    )
-  )
-
-output.success <- file.path(figure.dir, "BSEM_hurdle_success")
-
-
-
-ragg::agg_png(paste0(output.success, ".png"), width = 260/25.4, height = 230/25.4,
-              units = "in", res = 300)
-print(figure.success)
-dev.off()
-
-
-# Export all 72 plotted paths, with scales identified.
-path.summary <- bind_rows(
-  mutate(fixed.summary.inc.all, Figure = "incidence", Group = "All species", Scale = if_else(str_starts(to, "Naturalization"), "logit_P_positive", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.inc.annual, Figure = "incidence", Group = "Annual herbs", Scale = if_else(str_starts(to, "Naturalization"), "logit_P_positive", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.inc.perennial, Figure = "incidence", Group = "Perennial herbs", Scale = if_else(str_starts(to, "Naturalization"), "logit_P_positive", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.inc.woody, Figure = "incidence", Group = "Woody plants", Scale = if_else(str_starts(to, "Naturalization"), "logit_P_positive", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.ext.all, Figure = "extent", Group = "All species", Scale = if_else(str_starts(to, "Naturalization"), "log_mu_positive_component", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.ext.annual, Figure = "extent", Group = "Annual herbs", Scale = if_else(str_starts(to, "Naturalization"), "log_mu_positive_component", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.ext.perennial, Figure = "extent", Group = "Perennial herbs", Scale = if_else(str_starts(to, "Naturalization"), "log_mu_positive_component", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.ext.woody, Figure = "extent", Group = "Woody plants", Scale = if_else(str_starts(to, "Naturalization"), "log_mu_positive_component", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.suc.all, Figure = "success", Group = "All species", Scale = if_else(str_starts(to, "Naturalization"), "mean_d_logEY_dx", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.suc.annual, Figure = "success", Group = "Annual herbs", Scale = if_else(str_starts(to, "Naturalization"), "mean_d_logEY_dx", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.suc.perennial, Figure = "success", Group = "Perennial herbs", Scale = if_else(str_starts(to, "Naturalization"), "mean_d_logEY_dx", "cultivation_logit_coefficient")),
-  mutate(fixed.summary.suc.woody, Figure = "success", Group = "Woody plants", Scale = if_else(str_starts(to, "Naturalization"), "mean_d_logEY_dx", "cultivation_logit_coefficient"))
-)
-write.csv(path.summary, file.path(figure.dir, "TableS2_BSEM_hurdle_coefficients.csv"), row.names = FALSE)
-
+# ==============================================================================
+# END OF SCRIPT
+# ==============================================================================
