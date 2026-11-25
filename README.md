@@ -79,8 +79,24 @@
   
 
 ---
+#### 3.Rcode for BSEM gcomp.R
 
-#### 3. Rcode for Figures_2, S1 and Tables_1, S1.R
+**Purpose**: Sequential g-computation to quantify direct and cultivation-associated pathways linking native range size to naturalization incidence, extent, and overall success.
+
+**Key analyses**:
+
+- Compare the 25th and 75th percentiles of native range size for all species and each growth habit group using fitted BSEMs, without refitting the models
+- Decompose predicted differences into direct contributions and indirect contributions through cultivation within China, outside China, or both sequentially; calculate absolute and signed relative contributions
+- Check decomposition consistency and summarize R² for cultivation and naturalization equations
+
+**Outputs**:
+
+- `gcomp_three_outcomes_effects.csv`: Pathway effects and relative contributions for the three outcomes
+- `R2_all_equations_and_hurdle_parts.csv`: Equation-level R² summaries
+
+
+---
+#### 4. Rcode for Figures_2, S1 and Tables_1, S1.R
 
 **Purpose**: Hurdle model analysis examining how native range size, cultivation extent within and outside China, and growth habit predict naturalization success, incidence, and extent.
 
@@ -104,7 +120,7 @@
 
 ---
 
-#### 4. Rcode for Figure_S2.R
+#### 5. Rcode for Figure_S2.R
 
 **Purpose**: Visualization of linearized relationships from two-part hurdle models examining predictors of naturalization extent.
 
@@ -119,7 +135,7 @@
 
 ---
 
-#### 5. Rcode for Figure_S5.R
+#### 6. Rcode for Figure_S5.R
 
 **Purpose**: Pairwise correlation analysis of native range size, cultivation within China, and cultivation outside China.
 
