@@ -108,13 +108,13 @@ library(tidyverse)  # dplyr, readr, tibble, purrr, tidyr and the pipe %>%
 # Working directory. This path contains the only non-ASCII characters in the
 # script, so save the file as UTF-8. Before sharing the code, replace setwd()
 # with a relative path or an RStudio project.
-setwd("E:/中国本地植物归化/sem分析")
-setwd("")
+setwd("your_work_path")
 
-model_path <- "./2026.1104.results/models_naturalization_success.RData"
-data_path  <- "./20250530.native_plant.matched.cultivated_plant_DO11.csv"
-result_dir <- "./2026.1104.results"
+model_path <- "./models/models_naturalization_success.RData"
+data_path <- "./data/20250530.native_plant.matched.cultivated_plant_DO11.csv"
+result_dir <- "./results"
 dir.create(result_dir, recursive = TRUE, showWarnings = FALSE)
+
 
 # Monte Carlo settings
 #   Each mediator scenario is stored as an n_draws x n_sims matrix of doubles
