@@ -79,7 +79,7 @@
   
 
 ---
-#### 3.Rcode for BSEM gcomp.R
+#### 3. Rcode for BSEM gcomp.R
 
 **Purpose**: Sequential g-computation to quantify direct and cultivation-associated pathways linking native range size to naturalization incidence, extent, and overall success.
 
